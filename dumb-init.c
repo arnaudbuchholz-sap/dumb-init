@@ -19,6 +19,10 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <time.h>
+#include <utime.h>
+#include <sys/stat.h>
 #include "VERSION.h"
 
 #define PRINTERR(...) do { \
@@ -45,6 +49,7 @@ char signal_temporary_ignores[MAXSIG + 1] = {[0 ... MAXSIG] = 0};
 pid_t child_pid = -1;
 char debug = 0;
 char use_setsid = 1;
+char * touch_file = NULL;
 
 int translate_signal(int signum) {
     if (signum <= 0 || signum > MAXSIG) {
@@ -111,6 +116,21 @@ void handle_signal(int signum) {
 
             if (killed_pid == child_pid) {
                 forward_signal(SIGTERM);  // send SIGTERM to any remaining children
+                if (touch_file != NULL) {
+                    DEBUG("Touching '%s' before exiting.\n", touch_file);
+                    int fd = open(touch_file, O_CREAT, S_IRUSR | S_IWUSR);
+                    if (fd == -1) {
+                        DEBUG("Unable to touch file (errno=%d %s).\n", errno, strerror(errno));
+                    } else {
+                        struct stat file_stat;
+                        struct utimbuf times;
+                        stat(touch_file, &file_stat);
+                        times.actime = file_stat.st_atime;
+                        times.modtime = time(NULL);
+                        utime(touch_file, &times);
+                        close(fd);
+                    }
+                }
                 DEBUG("Child exited with status %d. Goodbye.\n", exit_status);
                 exit(exit_status);
             }
@@ -139,6 +159,7 @@ void print_help(char *argv[]) {
         "   -r, --rewrite s:r    Rewrite received signal s to new signal r before proxying.\n"
         "                        To ignore (not proxy) a signal, rewrite it to 0.\n"
         "                        This option can be specified multiple times.\n"
+        "   -t, --touch path     Touch the file upon completion.\n"
         "   -v, --verbose        Print debugging information to stderr.\n"
         "   -h, --help           Print this help message and exit.\n"
         "   -V, --version        Print the current version and exit.\n"
@@ -174,6 +195,10 @@ void parse_rewrite_signum(char *arg) {
     }
 }
 
+void parse_touch(char *arg) {
+    touch_file = arg;
+}
+
 void set_rewrite_to_sigstop_if_not_defined(int signum) {
     if (signal_rewrite[signum] == -1) {
         signal_rewrite[signum] = SIGSTOP;
@@ -186,11 +211,12 @@ char **parse_command(int argc, char *argv[]) {
         {"help",         no_argument,       NULL, 'h'},
         {"single-child", no_argument,       NULL, 'c'},
         {"rewrite",      required_argument, NULL, 'r'},
+        {"touch",        required_argument, NULL, 't'},
         {"verbose",      no_argument,       NULL, 'v'},
         {"version",      no_argument,       NULL, 'V'},
         {NULL,                     0,       NULL,   0},
     };
-    while ((opt = getopt_long(argc, argv, "+hvVcr:", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "+hvVcrt:", long_options, NULL)) != -1) {
         switch (opt) {
             case 'h':
                 print_help(argv);
@@ -206,6 +232,9 @@ char **parse_command(int argc, char *argv[]) {
                 break;
             case 'r':
                 parse_rewrite_signum(optarg);
+                break;
+            case 't':
+                parse_touch(optarg);
                 break;
             default:
                 exit(1);
